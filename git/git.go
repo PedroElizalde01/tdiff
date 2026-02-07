@@ -40,18 +40,13 @@ func ListChangedFiles(mode Mode) ([]string, error) {
 		return nil, err
 	}
 
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return []string{}, nil
-	}
-
-	lines := strings.Split(out, "\n")
-	files := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, line)
+	files := parseNonEmptyLines(out)
+	if mode == Worktree {
+		untrackedOut, err := runGit("ls-files", "--others", "--exclude-standard")
+		if err != nil {
+			return nil, err
 		}
+		files = appendUnique(files, parseNonEmptyLines(untrackedOut))
 	}
 	return files, nil
 }
@@ -60,8 +55,27 @@ func FileDiff(mode Mode, file string) (string, error) {
 	args := []string{"diff", "--no-color", "--unified=0", "--", file}
 	if mode == Staged {
 		args = []string{"diff", "--cached", "--no-color", "--unified=0", "--", file}
+		return runGit(args...)
 	}
-	return runGit(args...)
+
+	out, err := runGit(args...)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) != "" {
+		return out, nil
+	}
+
+	untracked, err := isUntrackedFile(file)
+	if err != nil {
+		return "", err
+	}
+	if !untracked {
+		return out, nil
+	}
+
+	// Untracked files are not shown by plain `git diff`; compare against /dev/null.
+	return runGitAllowExitCodes(map[int]struct{}{1: {}}, "diff", "--no-color", "--unified=0", "--no-index", "--", "/dev/null", file)
 }
 
 type CommandError struct {
@@ -108,4 +122,70 @@ func runGit(args ...string) (string, error) {
 		}
 	}
 	return stdout.String(), nil
+}
+
+func runGitAllowExitCodes(allowed map[int]struct{}, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if _, ok := allowed[exitErr.ExitCode()]; ok {
+				return stdout.String(), nil
+			}
+		}
+		output := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+		return output, &CommandError{
+			Args:   append([]string(nil), args...),
+			Output: output,
+			Err:    err,
+		}
+	}
+	return stdout.String(), nil
+}
+
+func isUntrackedFile(file string) (bool, error) {
+	out, err := runGit("ls-files", "--others", "--exclude-standard", "--", file)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+func parseNonEmptyLines(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{}
+	}
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func appendUnique(base []string, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	for _, item := range base {
+		seen[item] = struct{}{}
+	}
+	for _, item := range extra {
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		base = append(base, item)
+		seen[item] = struct{}{}
+	}
+	return base
 }
