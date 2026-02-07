@@ -52,9 +52,9 @@ func ListChangedFiles(mode Mode) ([]string, error) {
 }
 
 func FileDiff(mode Mode, file string) (string, error) {
-	args := []string{"diff", "--no-color", "--unified=0", "--", file}
+	args := []string{"diff", "--no-color", "--unified=3", "--", file}
 	if mode == Staged {
-		args = []string{"diff", "--cached", "--no-color", "--unified=0", "--", file}
+		args = []string{"diff", "--cached", "--no-color", "--unified=3", "--", file}
 		return runGit(args...)
 	}
 
@@ -75,7 +75,7 @@ func FileDiff(mode Mode, file string) (string, error) {
 	}
 
 	// Untracked files are not shown by plain `git diff`; compare against /dev/null.
-	return runGitAllowExitCodes(map[int]struct{}{1: {}}, "diff", "--no-color", "--unified=0", "--no-index", "--", "/dev/null", file)
+	return runGitAllowExitCodes(map[int]struct{}{1: {}}, "diff", "--no-color", "--unified=3", "--no-index", "--", "/dev/null", file)
 }
 
 type CommandError struct {

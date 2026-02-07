@@ -50,11 +50,15 @@ var (
 	selectedFocusedStyle   = lipgloss.NewStyle().Bold(true).Reverse(true)
 	selectedUnfocusedStyle = lipgloss.NewStyle().Bold(true)
 
-	metaStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	hunkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	delStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	addStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	cursorStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	metaStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	hunkStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	contextStyle = lipgloss.NewStyle()
+	oldLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	newLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	cursorStyle  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+
+	oldWordHighlight = lipgloss.NewStyle().Background(lipgloss.Color("52")).Foreground(lipgloss.Color("255"))
+	newWordHighlight = lipgloss.NewStyle().Background(lipgloss.Color("22")).Foreground(lipgloss.Color("255"))
 
 	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
@@ -166,36 +170,32 @@ func renderPanes(m RenderModel, leftWidth, rightWidth, height int) (string, stri
 
 		row := m.Rows[idx]
 		cursor := showCursor && idx == m.Cursor
-		oldLines = append(oldLines, renderPaneLine(row, true, oldNoWidth, leftWidth, cursor))
-		newLines = append(newLines, renderPaneLine(row, false, newNoWidth, rightWidth, cursor))
+		oldText := row.Old
+		newText := row.New
+		if isEditRow(row) {
+			oldText, newText = inlineHighlight(row.Old, row.New)
+		}
+
+		oldLines = append(oldLines, renderPaneLine(row, oldText, row.OldNo, oldNoWidth, leftWidth, cursor, true))
+		newLines = append(newLines, renderPaneLine(row, newText, row.NewNo, newNoWidth, rightWidth, cursor, false))
 	}
 
 	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n")
 }
 
-func renderPaneLine(row diff.Row, oldPane bool, noWidth, width int, cursor bool) string {
-	var no *int
-	text := ""
-	if oldPane {
-		no = row.OldNo
-		text = row.Old
-	} else {
-		no = row.NewNo
-		text = row.New
-	}
-
+func renderPaneLine(row diff.Row, text string, no *int, noWidth, width int, cursor bool, oldPane bool) string {
 	noText := ""
 	if no != nil {
 		noText = strconv.Itoa(*no)
 	}
-	line := fmt.Sprintf("%*s %s", noWidth, noText, text)
-	line = fitWidth(line, width)
-
 	style := paneStyle(row, oldPane)
+	text = style.Render(text)
+	line := formatPaneCell(noText, text, noWidth, width)
+
 	if cursor {
-		style = style.Copy().Inherit(cursorStyle)
+		line = cursorStyle.Render(line)
 	}
-	return style.Render(line)
+	return line
 }
 
 func paneStyle(row diff.Row, oldPane bool) lipgloss.Style {
@@ -204,25 +204,27 @@ func paneStyle(row diff.Row, oldPane bool) lipgloss.Style {
 		return metaStyle
 	case diff.Hunk:
 		return hunkStyle
+	case diff.Context:
+		return contextStyle
 	}
 
 	if oldPane {
-		if row.OldNo != nil && row.NewNo == nil {
-			return delStyle
+		if isPureDeletion(row) {
+			return oldLineStyle
 		}
-		if row.OldNo != nil && row.NewNo != nil && row.Old != row.New {
-			return delStyle
+		if isEditRow(row) {
+			return contextStyle
 		}
-		return lipgloss.NewStyle()
+		return contextStyle
 	}
 
-	if row.NewNo != nil && row.OldNo == nil {
-		return addStyle
+	if isPureAddition(row) {
+		return newLineStyle
 	}
-	if row.NewNo != nil && row.OldNo != nil && row.Old != row.New {
-		return addStyle
+	if isEditRow(row) {
+		return contextStyle
 	}
-	return lipgloss.NewStyle()
+	return contextStyle
 }
 
 func lineNumberWidth(rows []diff.Row, old bool) int {
@@ -273,15 +275,53 @@ func fitWidth(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) > width {
-		if width == 1 {
-			return string(r[:1])
+	return lipgloss.NewStyle().MaxWidth(width).Width(width).Render(s)
+}
+
+func formatPaneCell(noText, text string, noWidth, width int) string {
+	prefix := fmt.Sprintf("%*s ", noWidth, noText)
+	contentWidth := width - lipgloss.Width(prefix)
+	if contentWidth < 0 {
+		contentWidth = 0
+	}
+	text = lipgloss.NewStyle().MaxWidth(contentWidth).Render(text)
+	return fitWidth(prefix+text, width)
+}
+
+func isEditRow(row diff.Row) bool {
+	if row.Kind == diff.Meta || row.Kind == diff.Hunk {
+		return false
+	}
+	if row.Old == "" || row.New == "" {
+		return false
+	}
+	return row.Old != row.New
+}
+
+func inlineHighlight(oldText, newText string) (string, string) {
+	ops := diff.DiffTokens(diff.Tokenize(oldText), diff.Tokenize(newText))
+	var oldBuilder strings.Builder
+	var newBuilder strings.Builder
+
+	for _, op := range ops {
+		switch op.Kind {
+		case diff.Equal:
+			oldBuilder.WriteString(oldLineStyle.Render(op.Tok))
+			newBuilder.WriteString(newLineStyle.Render(op.Tok))
+		case diff.Delete:
+			oldBuilder.WriteString(oldWordHighlight.Render(op.Tok))
+		case diff.Insert:
+			newBuilder.WriteString(newWordHighlight.Render(op.Tok))
 		}
-		return string(r[:width-1]) + "…"
 	}
-	if len(r) < width {
-		return s + strings.Repeat(" ", width-len(r))
-	}
-	return s
+
+	return oldBuilder.String(), newBuilder.String()
+}
+
+func isPureDeletion(row diff.Row) bool {
+	return row.OldNo != nil && row.NewNo == nil
+}
+
+func isPureAddition(row diff.Row) bool {
+	return row.NewNo != nil && row.OldNo == nil
 }
