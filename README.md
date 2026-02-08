@@ -1,9 +1,9 @@
 <div align="center">
 <pre>
-████████╗██████╗ ██╗███████╗███████╗
-╚══██╔══╝██╔══██╗██║██╔════╝██╔════╝
-   ██║   ██║  ██║██║█████╗  █████╗
-   ██║   ██║  ██║██║██╔══╝  ██╔══╝
+     ████████╗██████╗ ██╗███████╗███████╗
+     ╚══██╔══╝██╔══██╗██║██╔════╝██╔════╝
+      ██║   ██║  ██║██║█████╗  █████╗
+      ██║   ██║  ██║██║██╔══╝  ██╔══╝
    ██║   ██████╔╝██║██║     ██║
    ╚═╝   ╚═════╝ ╚═╝╚═╝     ╚═╝
 </pre>
@@ -58,21 +58,15 @@ go build -o tdiff .
 
 ## Keybindings
 
-| Context | Keys | Action |
-|---|---|---|
-| Global | `q` / `Ctrl+C` | Quit |
-| Global | `s` | Toggle mode (`WORKTREE` / `STAGED`) |
-| Global | `a` | Cycle diff algorithm |
-| Files | `Up`/`Down` or `k`/`j` | Move file selection |
-| Files | `Enter` or `Right` | Focus `OLD` pane |
-| OLD | `Up`/`Down` or `k`/`j` | Move cursor-line |
-| OLD | `Left` | Focus files sidebar |
-| OLD | `Right` | Focus `NEW` pane |
-| NEW | `Up`/`Down` or `k`/`j` | Move cursor-line |
-| NEW | `Left` | Focus `OLD` pane |
-| NEW | `Right` | No-op |
-| Diff | `n` / `p` | Next / previous hunk |
-| Diff | `g` / `G` | Top / bottom |
+| Keys | Action |
+|---|---|
+| `q` / `Ctrl+C` | Quit |
+| `s` | Toggle mode (`WORKTREE` / `STAGED`) |
+| `a` | Cycle diff algorithm |
+| `Up`/`Down` or `k`/`j` | Move cursor |
+| `Left` / `Right` | Change focus |
+| `n` / `p` | Next / previous hunk |
+| `g` / `G` | Top / bottom |
 
 ## Diff Sources
 
