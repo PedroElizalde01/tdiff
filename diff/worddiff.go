@@ -1,6 +1,9 @@
 package diff
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 type OpKind int
 
@@ -91,6 +94,32 @@ func DiffTokens(a, b []string) []Op {
 	}
 
 	return ops
+}
+
+func SimilarityLines(aLine, bLine string) float64 {
+	return SimilarityTokens(
+		Tokenize(strings.TrimSpace(aLine)),
+		Tokenize(strings.TrimSpace(bLine)),
+	)
+}
+
+func SimilarityTokens(a, b []string) float64 {
+	maxLen := len(a)
+	if len(b) > maxLen {
+		maxLen = len(b)
+	}
+	if maxLen == 0 {
+		return 1
+	}
+
+	ops := DiffTokens(a, b)
+	equal := 0
+	for _, op := range ops {
+		if op.Kind == Equal {
+			equal++
+		}
+	}
+	return float64(equal) / float64(maxLen)
 }
 
 func tokenClass(r rune) int {

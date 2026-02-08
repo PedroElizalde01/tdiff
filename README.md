@@ -1,4 +1,4 @@
-# TDiff (Terminal Diff)
+# TDiff
 
 TDiff is a read-only terminal UI for Git diffs with a VS Code-like side-by-side view and fast keyboard navigation.
 

@@ -10,15 +10,17 @@ import (
 )
 
 type filesLoadedMsg struct {
-	req   int
-	mode  git.Mode
-	files []string
-	err   error
+	req      int
+	mode     git.Mode
+	files    []string
+	statuses map[string]string
+	err      error
 }
 
 type diffLoadedMsg struct {
 	req        int
 	mode       git.Mode
+	algo       git.DiffAlgo
 	file       string
 	rows       []diff.Row
 	hunkStarts []int
@@ -27,8 +29,10 @@ type diffLoadedMsg struct {
 
 type model struct {
 	mode          git.Mode
+	diffAlgo      git.DiffAlgo
 	focus         ui.Focus
 	files         []string
+	fileStatuses  map[string]string
 	selected      int
 	noChanges     bool
 	rows          []diff.Row
@@ -46,15 +50,17 @@ type model struct {
 
 func initialModel() model {
 	return model{
-		mode:      git.Worktree,
-		focus:     ui.FocusFiles,
-		files:     []string{"(loading...)"},
-		rows:      loadingRows("loading..."),
-		cursors:   map[string]int{},
-		width:     120,
-		height:    32,
-		filesReq:  1,
-		noChanges: false,
+		mode:         git.Worktree,
+		diffAlgo:     git.DiffHistogram,
+		focus:        ui.FocusFiles,
+		files:        []string{"(loading...)"},
+		fileStatuses: map[string]string{},
+		rows:         loadingRows("loading..."),
+		cursors:      map[string]int{},
+		width:        120,
+		height:       32,
+		filesReq:     1,
+		noChanges:    false,
 	}
 }
 
@@ -65,22 +71,36 @@ func (m model) Init() tea.Cmd {
 func loadFilesCmd(mode git.Mode, req int) tea.Cmd {
 	return func() tea.Msg {
 		files, err := git.ListChangedFiles(mode)
+		if err != nil {
+			return filesLoadedMsg{
+				req:   req,
+				mode:  mode,
+				files: files,
+				err:   err,
+			}
+		}
+		statuses, statusErr := git.FileStatuses(mode)
+		if statusErr != nil {
+			statuses = map[string]string{}
+		}
 		return filesLoadedMsg{
-			req:   req,
-			mode:  mode,
-			files: files,
-			err:   err,
+			req:      req,
+			mode:     mode,
+			files:    files,
+			statuses: statuses,
+			err:      err,
 		}
 	}
 }
 
-func loadDiffCmd(mode git.Mode, file string, req int) tea.Cmd {
+func loadDiffCmd(mode git.Mode, algo git.DiffAlgo, file string, req int) tea.Cmd {
 	return func() tea.Msg {
-		raw, err := git.FileDiff(mode, file)
+		raw, err := git.FileDiff(mode, algo, file)
 		if err != nil {
 			return diffLoadedMsg{
 				req:  req,
 				mode: mode,
+				algo: algo,
 				file: file,
 				err:  err,
 			}
@@ -89,6 +109,7 @@ func loadDiffCmd(mode git.Mode, file string, req int) tea.Cmd {
 		return diffLoadedMsg{
 			req:        req,
 			mode:       mode,
+			algo:       algo,
 			file:       file,
 			rows:       rows,
 			hunkStarts: hunks,
@@ -99,167 +120,225 @@ func loadDiffCmd(mode git.Mode, file string, req int) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.ensureSidebarVisible()
-		m.ensureCursorVisible()
-		return m, nil
+		return m.handleWindowSize(msg)
 	case filesLoadedMsg:
-		if msg.req != m.filesReq || msg.mode != m.mode {
-			return m, nil
-		}
-		if msg.err != nil {
-			m.errMsg = git.FriendlyError(msg.err)
-			m.noChanges = true
-			m.files = []string{"(no changes)"}
-			m.selected = 0
-			m.rows = noDiffRows()
-			m.hunkStarts = nil
-			m.cursor = 0
-			m.sidebarScroll = 0
-			m.diffScroll = 0
-			return m, nil
-		}
-
-		prevFile := m.selectedFile()
-		m.errMsg = ""
-		if len(msg.files) == 0 {
-			m.noChanges = true
-			m.files = []string{"(no changes)"}
-			m.selected = 0
-			m.rows = noDiffRows()
-			m.hunkStarts = nil
-			m.cursor = 0
-			m.sidebarScroll = 0
-			m.diffScroll = 0
-			return m, nil
-		}
-
-		m.noChanges = false
-		m.files = msg.files
-		m.selected = clamp(m.selected, 0, len(m.files)-1)
-		if prevFile != "" {
-			if idx := indexOf(prevFile, m.files); idx >= 0 {
-				m.selected = idx
-			}
-		}
-		m.ensureSidebarVisible()
-
-		m.rows = loadingRows("loading diff...")
-		m.hunkStarts = nil
-		m.diffScroll = 0
-		m.cursor = 0
-
-		file := m.selectedFile()
-		if file == "" {
-			m.rows = noDiffRows()
-			return m, nil
-		}
-		m.diffReq++
-		return m, loadDiffCmd(m.mode, file, m.diffReq)
+		return m.handleFilesLoaded(msg)
 	case diffLoadedMsg:
-		if msg.req != m.diffReq || msg.mode != m.mode || msg.file != m.selectedFile() {
-			return m, nil
-		}
-		if msg.err != nil {
-			m.errMsg = git.FriendlyError(msg.err)
-			m.rows = noDiffRows()
-			m.hunkStarts = nil
-			m.cursor = 0
-			m.diffScroll = 0
-			return m, nil
-		}
-
-		m.errMsg = ""
-		m.rows = msg.rows
-		m.hunkStarts = msg.hunkStarts
-		if len(m.rows) == 0 {
-			m.rows = noDiffRows()
-			m.hunkStarts = nil
-		}
-
-		current := m.selectedFile()
-		m.cursor = clamp(m.cursors[current], 0, len(m.rows)-1)
-		m.diffScroll = 0
-		m.ensureCursorVisible()
-		return m, nil
+		return m.handleDiffLoaded(msg)
 	case tea.KeyMsg:
-		key := msg.String()
-		switch key {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "s":
-			m.saveCursor()
-			m.mode = m.mode.Toggle()
-			m.noChanges = false
-			m.files = []string{"(loading...)"}
-			m.selected = 0
-			m.rows = loadingRows("loading...")
-			m.hunkStarts = nil
-			m.cursor = 0
-			m.sidebarScroll = 0
-			m.diffScroll = 0
-			m.errMsg = ""
-			m.filesReq++
-			return m, loadFilesCmd(m.mode, m.filesReq)
-		}
-
-		switch m.focus {
-		case ui.FocusFiles:
-			switch key {
-			case "up", "k":
-				cmd := m.moveSelection(-1)
-				return m, cmd
-			case "down", "j":
-				cmd := m.moveSelection(1)
-				return m, cmd
-			case "enter", "right":
-				m.focus = ui.FocusOld
-				return m, nil
-			}
-		case ui.FocusOld:
-			switch key {
-			case "up", "k":
-				m.moveCursor(-1)
-			case "down", "j":
-				m.moveCursor(1)
-			case "left":
-				m.focus = ui.FocusFiles
-			case "right":
-				m.focus = ui.FocusNew
-			case "n":
-				m.jumpHunk(1)
-			case "p":
-				m.jumpHunk(-1)
-			case "g":
-				m.goTop()
-			case "G":
-				m.goBottom()
-			}
-			return m, nil
-		case ui.FocusNew:
-			switch key {
-			case "up", "k":
-				m.moveCursor(-1)
-			case "down", "j":
-				m.moveCursor(1)
-			case "left":
-				m.focus = ui.FocusOld
-			case "right":
-				// no-op by spec
-			case "n":
-				m.jumpHunk(1)
-			case "p":
-				m.jumpHunk(-1)
-			case "g":
-				m.goTop()
-			case "G":
-				m.goBottom()
-			}
-			return m, nil
-		}
+		return m.handleKeyMsg(msg)
 	}
 
+	return m, nil
+}
+
+func (m model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	m.width = msg.Width
+	m.height = msg.Height
+	m.ensureSidebarVisible()
+	m.ensureCursorVisible()
+	return m, nil
+}
+
+func (m model) handleFilesLoaded(msg filesLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.req != m.filesReq || msg.mode != m.mode {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.errMsg = git.FriendlyError(msg.err)
+		m.applyNoChangesState()
+		return m, nil
+	}
+
+	prevFile := m.selectedFile()
+	m.errMsg = ""
+	if len(msg.files) == 0 {
+		m.applyNoChangesState()
+		return m, nil
+	}
+
+	m.noChanges = false
+	m.files = msg.files
+	m.fileStatuses = msg.statuses
+	m.selected = clamp(m.selected, 0, len(m.files)-1)
+	if prevFile != "" {
+		if idx := indexOf(prevFile, m.files); idx >= 0 {
+			m.selected = idx
+		}
+	}
+	m.ensureSidebarVisible()
+
+	m.rows = loadingRows("loading diff...")
+	m.hunkStarts = nil
+	m.diffScroll = 0
+	m.cursor = 0
+
+	file := m.selectedFile()
+	if file == "" {
+		m.rows = noDiffRows()
+		return m, nil
+	}
+	m.diffReq++
+	return m, loadDiffCmd(m.mode, m.diffAlgo, file, m.diffReq)
+}
+
+func (m *model) applyNoChangesState() {
+	m.noChanges = true
+	m.files = []string{"(no changes)"}
+	m.fileStatuses = map[string]string{}
+	m.selected = 0
+	m.rows = noDiffRows()
+	m.hunkStarts = nil
+	m.cursor = 0
+	m.sidebarScroll = 0
+	m.diffScroll = 0
+}
+
+func (m model) handleDiffLoaded(msg diffLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.req != m.diffReq || msg.mode != m.mode || msg.algo != m.diffAlgo || msg.file != m.selectedFile() {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.errMsg = git.FriendlyError(msg.err)
+		m.rows = noDiffRows()
+		m.hunkStarts = nil
+		m.cursor = 0
+		m.diffScroll = 0
+		return m, nil
+	}
+
+	m.errMsg = ""
+	m.rows = msg.rows
+	m.hunkStarts = msg.hunkStarts
+	if len(m.rows) == 0 {
+		m.rows = noDiffRows()
+		m.hunkStarts = nil
+	}
+
+	current := m.selectedFile()
+	m.cursor = clamp(m.cursors[current], 0, len(m.rows)-1)
+	m.diffScroll = 0
+	m.ensureCursorVisible()
+	return m, nil
+}
+
+func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "s":
+		return m.toggleMode()
+	case "a":
+		return m.cycleDiffAlgo()
+	}
+
+	switch m.focus {
+	case ui.FocusFiles:
+		return m.handleFilesFocusKey(key)
+	case ui.FocusOld:
+		return m.handleOldPaneKey(key)
+	case ui.FocusNew:
+		return m.handleNewPaneKey(key)
+	default:
+		return m, nil
+	}
+}
+
+// cycleDiffAlgo rotates through default -> histogram -> patience and reloads the
+// selected diff immediately so the user can compare hunk quality in-place.
+func (m model) cycleDiffAlgo() (tea.Model, tea.Cmd) {
+	m.diffAlgo = m.diffAlgo.Next()
+	if !m.hasRealFiles() {
+		return m, nil
+	}
+
+	m.saveCursor()
+	file := m.selectedFile()
+	if file == "" {
+		return m, nil
+	}
+
+	m.rows = loadingRows("loading diff...")
+	m.hunkStarts = nil
+	m.diffReq++
+	return m, loadDiffCmd(m.mode, m.diffAlgo, file, m.diffReq)
+}
+
+func (m model) toggleMode() (tea.Model, tea.Cmd) {
+	m.saveCursor()
+	m.mode = m.mode.Toggle()
+	m.noChanges = false
+	m.files = []string{"(loading...)"}
+	m.fileStatuses = map[string]string{}
+	m.selected = 0
+	m.rows = loadingRows("loading...")
+	m.hunkStarts = nil
+	m.cursor = 0
+	m.sidebarScroll = 0
+	m.diffScroll = 0
+	m.errMsg = ""
+	m.filesReq++
+	return m, loadFilesCmd(m.mode, m.filesReq)
+}
+
+func (m model) handleFilesFocusKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		cmd := m.moveSelection(-1)
+		return m, cmd
+	case "down", "j":
+		cmd := m.moveSelection(1)
+		return m, cmd
+	case "enter", "right":
+		m.focus = ui.FocusOld
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m model) handleOldPaneKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		m.moveCursor(-1)
+	case "down", "j":
+		m.moveCursor(1)
+	case "left":
+		m.focus = ui.FocusFiles
+	case "right":
+		m.focus = ui.FocusNew
+	case "n":
+		m.jumpHunk(1)
+	case "p":
+		m.jumpHunk(-1)
+	case "g":
+		m.goTop()
+	case "G":
+		m.goBottom()
+	}
+	return m, nil
+}
+
+func (m model) handleNewPaneKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		m.moveCursor(-1)
+	case "down", "j":
+		m.moveCursor(1)
+	case "left":
+		m.focus = ui.FocusOld
+	case "right":
+		// no-op by spec
+	case "n":
+		m.jumpHunk(1)
+	case "p":
+		m.jumpHunk(-1)
+	case "g":
+		m.goTop()
+	case "G":
+		m.goBottom()
+	}
 	return m, nil
 }
 
@@ -268,8 +347,10 @@ func (m model) View() string {
 		Width:         m.width,
 		Height:        m.height,
 		ModeLabel:     m.mode.String(),
+		AlgoLabel:     m.diffAlgo.String(),
 		Focus:         m.focus,
 		Files:         m.files,
+		FileStatuses:  m.fileStatuses,
 		Selected:      m.selected,
 		SidebarScroll: m.sidebarScroll,
 		Rows:          m.rows,
@@ -303,7 +384,7 @@ func (m *model) moveSelection(delta int) tea.Cmd {
 	m.cursor = 0
 	m.diffScroll = 0
 	m.diffReq++
-	return loadDiffCmd(m.mode, file, m.diffReq)
+	return loadDiffCmd(m.mode, m.diffAlgo, file, m.diffReq)
 }
 
 func (m *model) moveCursor(delta int) {
@@ -398,7 +479,7 @@ func (m *model) ensureSidebarVisible() {
 		return
 	}
 
-	visible := m.bodyHeight() - 1
+	visible := ui.SidebarVisibleFiles(m.bodyHeight())
 	if visible < 1 {
 		visible = 1
 	}
